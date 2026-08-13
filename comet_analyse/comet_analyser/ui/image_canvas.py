@@ -10,9 +10,14 @@
 """
 
 from PyQt5.QtWidgets import QLabel
-from PyQt5.QtCore import Qt, QRect, pyqtSignal, QPoint
-from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QColor
+from PyQt5.QtCore import Qt, QRect, pyqtSignal, QPoint, QPointF
+from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QPolygonF
 import numpy as np
+
+# ==================== 标注图层颜色常量 ====================
+HEAD_CIRCLE_COLOR = QColor(0, 150, 255)      # 头部：亮蓝描边、无填充
+TAIL_COLOR = QColor(255, 255, 0)             # 尾部：明黄描边
+TAIL_FILL_COLOR = QColor(255, 255, 0, 150)   # 尾部：半透明明黄填充
 
 
 class ImageCanvas(QLabel):
@@ -52,13 +57,29 @@ class ImageCanvas(QLabel):
         # 对外显示原始 pixmap
         self._display_pixmap: QPixmap = None
 
+        # 标注图层（叠加在图像上层的持久标注，直到切换图片才清空）
+        # 每个标注: {"head_center": (x, y), "head_radius": float,
+        #            "tail_contours": [[(x, y), ...], ...]}
+        self._annotations: list = []
+
     # ==================== 公共接口 ====================
 
     def set_image(self, pixmap: QPixmap):
         """设置原始图像并自适应缩放显示"""
         self._original_pixmap = pixmap
         self._current_rect = None
+        self._annotations = []
         self._update_scaled()
+
+    def set_annotations(self, annotations: list):
+        """设置标注图层内容（替换现有标注）"""
+        self._annotations = list(annotations)
+        self._update_display()
+
+    def clear_annotations(self):
+        """清空标注图层"""
+        self._annotations = []
+        self._update_display()
 
     def get_selected_image_rect(self) -> QRect:
         """获取当前框选区域（映射回原始图像坐标）"""
@@ -156,9 +177,49 @@ class ImageCanvas(QLabel):
             painter.setBrush(self._fill_color)
             painter.drawRect(self._current_rect)
 
+        # 绘制标注图层（彗星轮廓：头部圆 + 尾部明黄）
+        self._draw_annotations(painter)
+
         painter.end()
         self._display_pixmap = canvas
         self.setPixmap(canvas)
+
+    def _draw_annotations(self, painter: QPainter):
+        """在图像上层绘制持久标注（头部圆无填充、尾部明黄填充）"""
+        if not self._annotations or not self._scaled_pixmap:
+            return
+
+        s = self._scale_factor
+        ox = self._offset_x
+        oy = self._offset_y
+
+        painter.save()
+
+        # 1. 尾部：明黄填充 + 描边
+        for ann in self._annotations:
+            for poly in ann.get("tail_contours", []):
+                if len(poly) < 3:
+                    continue
+                qpoly = QPolygonF([QPointF(ox + px * s, oy + py * s) for (px, py) in poly])
+                painter.setPen(QPen(TAIL_COLOR, 1))
+                painter.setBrush(QBrush(TAIL_FILL_COLOR))
+                painter.drawPolygon(qpoly)
+
+        # 2. 头部：正圆、无填充描边
+        pen_width = max(1, round(2 * s))
+        for ann in self._annotations:
+            hx, hy = ann.get("head_center", (0.0, 0.0))
+            radius = float(ann.get("head_radius", 0.0))
+            if radius <= 0:
+                continue
+            cx = ox + hx * s
+            cy = oy + hy * s
+            r = radius * s
+            painter.setPen(QPen(HEAD_CIRCLE_COLOR, pen_width))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QPointF(cx, cy), r, r)
+
+        painter.restore()
 
     # ==================== 坐标映射 ====================
 

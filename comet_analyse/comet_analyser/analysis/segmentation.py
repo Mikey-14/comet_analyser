@@ -26,6 +26,8 @@ class CometRegion:
     head_bbox: Tuple[int, int, int, int]  # 头部包围盒 (x, y, w, h)
     tail_bbox: Tuple[int, int, int, int]  # 尾部包围盒
     orientation: float          # 彗星朝向角度（弧度）
+    head_centroid: Tuple[float, float] = (0.0, 0.0)  # 头部质心（用于标注圆）
+    head_radius: float = 0.0                         # 头部拟合圆半径（像素）
 
 
 def threshold_otsu(img: np.ndarray) -> np.ndarray:
@@ -91,6 +93,33 @@ def find_largest_object(binary: np.ndarray) -> np.ndarray:
     mask = np.zeros_like(binary)
     cv2.drawContours(mask, [largest], -1, 255, -1)
     return mask
+
+
+def find_component_at(
+    binary: np.ndarray,
+    point: Tuple[int, int]
+) -> np.ndarray:
+    """
+    保留包含指定点的连通域，其余清零。
+
+    相比 find_largest_object（保留最大连通域），此函数以"种子点"锚定目标，
+    在低阈值下更稳健——避免选中与彗星无关的大片背景。
+
+    Args:
+        binary: 二值图像
+        point: 种子点坐标 (x, y)
+
+    Returns:
+        仅包含种子点所在连通域的二值掩码
+    """
+    x, y = int(point[0]), int(point[1])
+    h, w = binary.shape[:2]
+    if not (0 <= x < w and 0 <= y < h) or binary[y, x] == 0:
+        return np.zeros_like(binary)
+
+    num, labels = cv2.connectedComponents(binary)
+    label = labels[y, x]
+    return ((labels == label) * 255).astype(np.uint8)
 
 
 def find_head_center(gray: np.ndarray, mask: np.ndarray) -> Tuple[int, int]:
@@ -169,49 +198,82 @@ def separate_head_tail(
     return head_mask, tail_mask
 
 
-def segment_comet(
-    gray: np.ndarray,
-    threshold_method: str = "otsu",
-    head_radius_ratio: float = 0.25,
-    adaptive_block: int = 31,
-    adaptive_c: int = 2
-) -> Optional[CometRegion]:
+def compute_head_circle(
+    head_mask: np.ndarray
+) -> Tuple[Tuple[float, float], float]:
     """
-    完整的彗星分割管线。
+    根据头部掩码形状计算头部拟合圆：
+    圆心取头部掩码的几何质心，半径取质心到最远头部像素的距离。
 
     Args:
-        gray: 预处理后的灰度图像
-        threshold_method: 'otsu' 或 'adaptive'
-        head_radius_ratio: 头部半径比例
-        adaptive_block: 自适应阈值块大小
-        adaptive_c: 自适应阈值常数
+        head_mask: 头部二值掩码
 
     Returns:
-        CometRegion 对象，分割失败则返回 None
+        ((cx, cy), radius) — 圆心坐标与半径（像素）
     """
-    # 1. 阈值分割
-    if threshold_method == "otsu":
-        binary = threshold_otsu(gray)
-    elif threshold_method == "adaptive":
-        binary = threshold_adaptive(gray, adaptive_block, adaptive_c)
+    ys, xs = np.where(head_mask > 0)
+    if len(xs) == 0:
+        return (0.0, 0.0), 0.0
+    cx = float(np.mean(xs))
+    cy = float(np.mean(ys))
+    distances = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+    radius = float(np.max(distances))
+    return (cx, cy), max(radius, 1.0)
+
+
+def _apply_tail_direction(
+    mask: np.ndarray,
+    cx: int,
+    cy: int,
+    direction: str = "right"
+) -> np.ndarray:
+    """
+    将尾部掩码限制在头部指定的拖尾方向上。
+
+    统一标准：彗星从右往左飞行，头部在左、尾部拖向右（默认 "right"）。
+
+    Args:
+        mask: 尾部二值掩码
+        cx: 头部中心 x
+        cy: 头部中心 y
+        direction: 拖尾方向 'right' / 'left' / 'up' / 'down'
+
+    Returns:
+        限制方向后的尾部掩码
+    """
+    h, w = mask.shape[:2]
+    keep = np.zeros_like(mask)
+
+    if direction == "right":
+        keep[:, cx + 1:] = 255
+    elif direction == "left":
+        keep[:, :cx] = 255
+    elif direction == "up":
+        keep[:cy, :] = 255
+    elif direction == "down":
+        keep[cy + 1:, :] = 255
     else:
-        raise ValueError(f"未知阈值方法: {threshold_method}")
+        raise ValueError(f"未知拖尾方向: {direction}")
 
-    # 2. 保留最大连通域
-    comet_mask = find_largest_object(binary)
+    return cv2.bitwise_and(mask, keep)
 
-    if cv2.countNonZero(comet_mask) == 0:
-        return None
 
-    # 3. 定位头部中心（亮度最高点）
-    head_center = find_head_center(gray, comet_mask)
+def _finalize_region(
+    comet_mask: np.ndarray,
+    head_mask: np.ndarray,
+    tail_mask: np.ndarray,
+    head_center: Tuple[int, int],
+    tail_direction: str = "right"
+) -> CometRegion:
+    """根据已分离的头/尾掩码补齐包围盒、朝向与头部拟合圆信息。"""
+    # 限制尾部只在头部拖尾方向（保持头部干净，去除环绕头部的光晕）
+    if tail_direction is not None:
+        tail_mask = _apply_tail_direction(
+            tail_mask, head_center[0], head_center[1], tail_direction
+        )
 
-    # 4. 分离头尾
-    head_mask, tail_mask = separate_head_tail(
-        gray, comet_mask, head_center, head_radius_ratio
-    )
+    head_centroid, head_radius = compute_head_circle(head_mask)
 
-    # 5. 计算包围盒和朝向
     hx, hy = head_center
 
     # 头部包围盒
@@ -250,5 +312,133 @@ def segment_comet(
         head_center=head_center,
         head_bbox=head_bbox,
         tail_bbox=tail_bbox,
-        orientation=orientation
+        orientation=orientation,
+        head_centroid=head_centroid,
+        head_radius=head_radius
     )
+
+
+def _segment_by_threshold(
+    gray: np.ndarray,
+    head_thresh: float,
+    tail_thresh: float,
+    tail_direction: str = "right"
+) -> Optional[CometRegion]:
+    """
+    基于自定义强度阈值分割彗星。
+
+    头部亮度高于尾部，因此：
+    - 彗星整体 = 强度 >= tail_thresh 的像素（取最大连通域）
+    - 头部     = 以亮核（>= head_thresh）拟合的圆盘 ∩ 彗星（保持头部干净）
+    - 尾部     = 彗星整体 - 头部，且局限在头部拖尾方向（默认右侧）
+
+    Args:
+        gray: 灰度图像 (uint8)
+        head_thresh: 头部阈值 (0-1)
+        tail_thresh: 尾部阈值 (0-1)
+        tail_direction: 拖尾方向，默认 'right'（彗星从右往左飞行）
+
+    Returns:
+        CometRegion 对象，分割失败则返回 None
+    """
+    gray_norm = gray.astype(np.float32) / 255.0
+
+    # 1. 头部亮核（用于定位头部中心与确定头部形状）
+    head_core_raw = ((gray_norm >= head_thresh) * 255).astype(np.uint8)
+
+    if cv2.countNonZero(head_core_raw) > 0:
+        head_centroid, head_radius = compute_head_circle(head_core_raw)
+        seed = (int(round(head_centroid[0])), int(round(head_centroid[1])))
+    else:
+        # 亮核为空（头部阈值过高）：用全图最亮点定位头部
+        _, _, _, max_loc = cv2.minMaxLoc(gray)
+        seed = max_loc
+
+    # 2. 彗星 = 包含头部种子的连通域（>= tail_thresh）
+    #    以头部锚定，避免低阈值时误选大片背景作为彗星
+    comet_binary = ((gray_norm >= tail_thresh) * 255).astype(np.uint8)
+    comet_mask = find_component_at(comet_binary, seed)
+    if cv2.countNonZero(comet_mask) == 0:
+        return None
+
+    # 3. 头部亮核 ∩ 彗星
+    head_core = cv2.bitwise_and(head_core_raw, comet_mask)
+    head_centroid, head_radius = compute_head_circle(head_core)
+
+    if cv2.countNonZero(head_core) == 0:
+        # 彗星内无亮核：退化为最亮点 + 圆形分离
+        head_center = find_head_center(gray, comet_mask)
+        head_mask, tail_mask = separate_head_tail(gray, comet_mask, head_center)
+        return _finalize_region(
+            comet_mask, head_mask, tail_mask, head_center, tail_direction
+        )
+
+    cx = int(round(head_centroid[0]))
+    cy = int(round(head_centroid[1]))
+
+    # 4. 头部圆盘（干净的圆头部）
+    head_disk = np.zeros_like(comet_mask)
+    cv2.circle(head_disk, (cx, cy), int(round(head_radius)), 255, -1)
+    head_mask = cv2.bitwise_and(head_disk, comet_mask)
+
+    # 5. 尾部 = 彗星 - 头部圆盘（方向限制在 _finalize_region 中统一处理）
+    tail_mask = cv2.subtract(comet_mask, head_mask)
+
+    head_center = (cx, cy)
+    return _finalize_region(
+        comet_mask, head_mask, tail_mask, head_center, tail_direction
+    )
+
+
+def segment_comet(
+    gray: np.ndarray,
+    threshold_method: str = "otsu",
+    head_radius_ratio: float = 0.25,
+    adaptive_block: int = 31,
+    adaptive_c: int = 2,
+    head_thresh: Optional[float] = None,
+    tail_thresh: Optional[float] = None,
+    tail_direction: str = "right"
+) -> Optional[CometRegion]:
+    """
+    完整的彗星分割管线。
+
+    Args:
+        gray: 预处理后的灰度图像
+        threshold_method: 'otsu' 或 'adaptive'
+        head_radius_ratio: 头部半径比例（仅自动模式使用）
+        adaptive_block: 自适应阈值块大小
+        adaptive_c: 自适应阈值常数
+        head_thresh: 自定义头部阈值 (0-1)，与 tail_thresh 同时提供时启用
+        tail_thresh: 自定义尾部阈值 (0-1)，与 head_thresh 同时提供时启用
+        tail_direction: 拖尾方向，默认 'right'（彗星从右往左飞行，尾部在头部右侧）
+
+    Returns:
+        CometRegion 对象，分割失败则返回 None
+    """
+    # 自定义阈值模式（头/尾阈值分开设置）
+    if head_thresh is not None and tail_thresh is not None:
+        return _segment_by_threshold(gray, head_thresh, tail_thresh, tail_direction)
+
+    # 自动阈值模式
+    if threshold_method == "otsu":
+        binary = threshold_otsu(gray)
+    elif threshold_method == "adaptive":
+        binary = threshold_adaptive(gray, adaptive_block, adaptive_c)
+    else:
+        raise ValueError(f"未知阈值方法: {threshold_method}")
+
+    # 保留最大连通域
+    comet_mask = find_largest_object(binary)
+    if cv2.countNonZero(comet_mask) == 0:
+        return None
+
+    # 定位头部中心（亮度最高点）
+    head_center = find_head_center(gray, comet_mask)
+
+    # 分离头尾
+    head_mask, tail_mask = separate_head_tail(
+        gray, comet_mask, head_center, head_radius_ratio
+    )
+
+    return _finalize_region(comet_mask, head_mask, tail_mask, head_center, tail_direction)

@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QMessageBox, QStatusBar, QSplitter,
     QListWidget, QGroupBox, QPushButton, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QFrame, QSizePolicy, QInputDialog
+    QFrame, QSizePolicy, QInputDialog, QCheckBox, QDoubleSpinBox
 )
 from PyQt5.QtCore import Qt, QSize, QRect
 from PyQt5.QtGui import QPixmap, QImage
@@ -128,6 +128,33 @@ class MainWindow(QMainWindow):
         mode_layout.addStretch()
         mode_layout.addWidget(self.btn_done)
 
+        # ====== 阈值设置行 ======
+        thresh_layout = QHBoxLayout()
+        self.chk_custom_threshold = QCheckBox("使用自定义阈值")
+        self.chk_custom_threshold.toggled.connect(self._on_toggle_threshold)
+        thresh_layout.addWidget(self.chk_custom_threshold)
+
+        thresh_layout.addWidget(QLabel("头部阈值:"))
+        self.spin_head_thresh = QDoubleSpinBox()
+        self.spin_head_thresh.setRange(0.0, 1.0)
+        self.spin_head_thresh.setDecimals(3)
+        self.spin_head_thresh.setSingleStep(0.001)
+        self.spin_head_thresh.setValue(0.5)
+        self.spin_head_thresh.setToolTip("头部亮度阈值：越高头部识别越严格")
+        thresh_layout.addWidget(self.spin_head_thresh)
+
+        thresh_layout.addWidget(QLabel("尾部阈值:"))
+        self.spin_tail_thresh = QDoubleSpinBox()
+        self.spin_tail_thresh.setRange(0.0, 1.0)
+        self.spin_tail_thresh.setDecimals(3)
+        self.spin_tail_thresh.setSingleStep(0.001)
+        self.spin_tail_thresh.setValue(0.2)
+        self.spin_tail_thresh.setToolTip("尾部亮度阈值：越高彗星识别越严格，越接近0越宽泛")
+        thresh_layout.addWidget(self.spin_tail_thresh)
+        thresh_layout.addStretch()
+
+        image_layout.addLayout(thresh_layout)
+
         self.canvas = ImageCanvas()
         self.canvas.setMinimumSize(500, 400)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -200,6 +227,8 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(2, 0)
 
         main_layout.addWidget(splitter)
+
+        self._on_toggle_threshold(False)
 
     # ==================== 菜单栏 ====================
 
@@ -330,6 +359,10 @@ class MainWindow(QMainWindow):
                     "QLabel { font-size: 13px; padding: 6px; background: #d4edda; "
                     "border-radius: 4px; color: #155724; }"
                 )
+
+    def _on_toggle_threshold(self, checked: bool):
+        self.spin_head_thresh.setEnabled(checked)
+        self.spin_tail_thresh.setEnabled(checked)
 
     # ==================== 图片加载 ====================
 
@@ -465,6 +498,7 @@ class MainWindow(QMainWindow):
             self.bg_mean = self.current_cells[0].get("bg_mean", None)
         self._update_cell_table()
         self._update_mode_ui()
+        self._refresh_overlay()
 
     # ==================== 框选回调（核心） ====================
 
@@ -510,6 +544,11 @@ class MainWindow(QMainWindow):
 
     def _handle_cell_selection(self, roi: np.ndarray):
         try:
+            # 框选区域在原图中的偏移（用于将 ROI 坐标映射回原图）
+            img_rect = self.canvas.get_selected_image_rect()
+            offset_x = img_rect.x()
+            offset_y = img_rect.y()
+
             if len(roi.shape) == 3:
                 raw_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
             else:
@@ -527,12 +566,21 @@ class MainWindow(QMainWindow):
             processed = denoise(processed, method="gaussian", kernel_size=3)
             processed = enhance_clahe(processed, clip_limit=1.5)
 
-            # 分割
-            region = segment_comet(processed)
+            # 分割（支持自定义头/尾阈值）
+            if self.chk_custom_threshold.isChecked():
+                region = segment_comet(
+                    processed,
+                    head_thresh=self.spin_head_thresh.value(),
+                    tail_thresh=self.spin_tail_thresh.value()
+                )
+            else:
+                region = segment_comet(processed)
+
             if region is None:
                 QMessageBox.warning(
                     self, "分析失败",
-                    "未能在此区域中检测到彗星。\n请检查框选是否包含完整的彗星细胞。"
+                    "未能在此区域中检测到彗星。\n请检查框选是否包含完整的彗星细胞，"
+                    "或调整阈值设置。"
                 )
                 return
 
@@ -544,18 +592,23 @@ class MainWindow(QMainWindow):
             metrics = compute_all_metrics(gray_bg_corrected, region,
                                           pixel_size_um=self.pixel_size_um)
 
+            # 生成标注（映射回原图坐标）
+            annotation = self._build_annotation(region, offset_x, offset_y)
+
             # 记录细胞
             self._cell_counter += 1
             label = f"Cell_{self._cell_counter}"
             self.current_cells.append({
                 "label": label,
                 "metrics": metrics,
-                "bg_mean": self.bg_mean
+                "bg_mean": self.bg_mean,
+                "annotation": annotation
             })
 
             # 更新UI
             self._save_current_results()
             self._update_cell_table()
+            self._refresh_overlay()
 
             self.status_bar.showMessage(
                 f"{label} 分析完成 — Tail DNA%: {metrics.tail_dna_percent:.1f}%, "
@@ -567,6 +620,35 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "错误", f"分析过程出错:\n{str(e)}")
+
+    def _build_annotation(self, region, offset_x: int, offset_y: int) -> dict:
+        """将分割结果转换为标注对象（坐标映射回原图）"""
+        tail_contours = []
+        contours, _ = cv2.findContours(
+            region.tail_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        for c in contours:
+            pts = [(int(p[0][0]) + offset_x, int(p[0][1]) + offset_y) for p in c]
+            if len(pts) >= 3:
+                tail_contours.append(pts)
+
+        head_cx = region.head_centroid[0] + offset_x
+        head_cy = region.head_centroid[1] + offset_y
+
+        return {
+            "head_center": (head_cx, head_cy),
+            "head_radius": float(region.head_radius),
+            "tail_contours": tail_contours
+        }
+
+    def _refresh_overlay(self):
+        """根据当前细胞的标注重建画布标注图层"""
+        annotations = [
+            cell.get("annotation")
+            for cell in self.current_cells
+            if cell.get("annotation")
+        ]
+        self.canvas.set_annotations(annotations)
 
     # ==================== 完成当前图片 ====================
 
@@ -607,6 +689,7 @@ class MainWindow(QMainWindow):
                 cell["label"] = f"Cell_{i + 1}"
             self._save_current_results()
             self._update_cell_table()
+            self._refresh_overlay()
 
     def _on_table_context_menu(self, pos):
         row = self.cell_table.rowAt(pos.y())
