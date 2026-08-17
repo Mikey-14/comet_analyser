@@ -258,21 +258,62 @@ def _apply_tail_direction(
     return cv2.bitwise_and(mask, keep)
 
 
+def _apply_tail_width_limit(
+    tail_mask: np.ndarray,
+    head_center: Tuple[int, int],
+    head_radius: float
+) -> np.ndarray:
+    """
+    限制尾部宽度：任意位置的尾部上下宽度不得超过头部直径。
+
+    以头部中心 y 为基准，截取高度 = 头部直径的水平带，
+    超出部分全部裁掉。
+
+    Args:
+        tail_mask: 已限制方向的尾部掩码
+        head_center: 头部中心 (x, y)
+        head_radius: 头部拟合圆半径
+
+    Returns:
+        宽度限制后的尾部掩码
+    """
+    if head_radius <= 0:
+        return tail_mask
+
+    _, hy = head_center
+    head_diameter = 2.0 * head_radius
+    max_half_width = head_diameter / 2.0
+
+    h = tail_mask.shape[0]
+    y_min = max(0, int(round(hy - max_half_width)))
+    y_max = min(h, int(round(hy + max_half_width)) + 1)
+
+    limit = np.zeros_like(tail_mask)
+    limit[y_min:y_max, :] = 255
+
+    return cv2.bitwise_and(tail_mask, limit)
+
+
 def _finalize_region(
     comet_mask: np.ndarray,
     head_mask: np.ndarray,
     tail_mask: np.ndarray,
     head_center: Tuple[int, int],
-    tail_direction: str = "right"
+    tail_direction: str = "right",
+    tail_mode: int = 1
 ) -> CometRegion:
     """根据已分离的头/尾掩码补齐包围盒、朝向与头部拟合圆信息。"""
+    head_centroid, head_radius = compute_head_circle(head_mask)
+
     # 限制尾部只在头部拖尾方向（保持头部干净，去除环绕头部的光晕）
     if tail_direction is not None:
         tail_mask = _apply_tail_direction(
             tail_mask, head_center[0], head_center[1], tail_direction
         )
 
-    head_centroid, head_radius = compute_head_circle(head_mask)
+    # 模式2：宽度限制（尾部任意位置宽度不得超过头部直径）
+    if tail_mode == 2:
+        tail_mask = _apply_tail_width_limit(tail_mask, head_center, head_radius)
 
     hx, hy = head_center
 
@@ -322,7 +363,8 @@ def _segment_by_threshold(
     gray: np.ndarray,
     head_thresh: float,
     tail_thresh: float,
-    tail_direction: str = "right"
+    tail_direction: str = "right",
+    tail_mode: int = 1
 ) -> Optional[CometRegion]:
     """
     基于自定义强度阈值分割彗星。
@@ -331,12 +373,14 @@ def _segment_by_threshold(
     - 彗星整体 = 强度 >= tail_thresh 的像素（取最大连通域）
     - 头部     = 以亮核（>= head_thresh）拟合的圆盘 ∩ 彗星（保持头部干净）
     - 尾部     = 彗星整体 - 头部，且局限在头部拖尾方向（默认右侧）
+      模式1：方向限制；模式2：额外锥形限制（尾部宽度随距离线性收缩）
 
     Args:
         gray: 灰度图像 (uint8)
         head_thresh: 头部阈值 (0-1)
         tail_thresh: 尾部阈值 (0-1)
-        tail_direction: 拖尾方向，默认 'right'（彗星从右往左飞行）
+        tail_direction: 拖尾方向，默认 'right'
+        tail_mode: 分割模式 1=方向限制 2=锥形限制
 
     Returns:
         CometRegion 对象，分割失败则返回 None
@@ -370,7 +414,7 @@ def _segment_by_threshold(
         head_center = find_head_center(gray, comet_mask)
         head_mask, tail_mask = separate_head_tail(gray, comet_mask, head_center)
         return _finalize_region(
-            comet_mask, head_mask, tail_mask, head_center, tail_direction
+            comet_mask, head_mask, tail_mask, head_center, tail_direction, tail_mode
         )
 
     cx = int(round(head_centroid[0]))
@@ -386,7 +430,7 @@ def _segment_by_threshold(
 
     head_center = (cx, cy)
     return _finalize_region(
-        comet_mask, head_mask, tail_mask, head_center, tail_direction
+        comet_mask, head_mask, tail_mask, head_center, tail_direction, tail_mode
     )
 
 
@@ -398,7 +442,8 @@ def segment_comet(
     adaptive_c: int = 2,
     head_thresh: Optional[float] = None,
     tail_thresh: Optional[float] = None,
-    tail_direction: str = "right"
+    tail_direction: str = "right",
+    tail_mode: int = 1
 ) -> Optional[CometRegion]:
     """
     完整的彗星分割管线。
@@ -411,14 +456,17 @@ def segment_comet(
         adaptive_c: 自适应阈值常数
         head_thresh: 自定义头部阈值 (0-1)，与 tail_thresh 同时提供时启用
         tail_thresh: 自定义尾部阈值 (0-1)，与 head_thresh 同时提供时启用
-        tail_direction: 拖尾方向，默认 'right'（彗星从右往左飞行，尾部在头部右侧）
+        tail_direction: 拖尾方向，默认 'right'
+        tail_mode: 分割模式 1=方向限制 2=锥形限制
 
     Returns:
         CometRegion 对象，分割失败则返回 None
     """
     # 自定义阈值模式（头/尾阈值分开设置）
     if head_thresh is not None and tail_thresh is not None:
-        return _segment_by_threshold(gray, head_thresh, tail_thresh, tail_direction)
+        return _segment_by_threshold(
+            gray, head_thresh, tail_thresh, tail_direction, tail_mode
+        )
 
     # 自动阈值模式
     if threshold_method == "otsu":
@@ -441,4 +489,6 @@ def segment_comet(
         gray, comet_mask, head_center, head_radius_ratio
     )
 
-    return _finalize_region(comet_mask, head_mask, tail_mask, head_center, tail_direction)
+    return _finalize_region(
+        comet_mask, head_mask, tail_mask, head_center, tail_direction, tail_mode
+    )

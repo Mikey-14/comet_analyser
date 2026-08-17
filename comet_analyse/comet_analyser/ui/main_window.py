@@ -13,13 +13,14 @@ import numpy as np
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QAction, QToolBar, QMenu,
+    QLabel, QAction, QMenu,
     QFileDialog, QMessageBox, QStatusBar, QSplitter,
     QListWidget, QGroupBox, QPushButton, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QFrame, QSizePolicy, QInputDialog, QCheckBox, QDoubleSpinBox
+    QFrame, QSizePolicy, QInputDialog, QCheckBox, QDoubleSpinBox,
+    QComboBox
 )
-from PyQt5.QtCore import Qt, QSize, QRect
+from PyQt5.QtCore import Qt, QRect
 from PyQt5.QtGui import QPixmap, QImage
 
 from analysis.preprocess import load_image, denoise, enhance_clahe
@@ -31,6 +32,10 @@ from .image_canvas import ImageCanvas
 # ==================== 颜色常量 ====================
 COLOR_BG = (255, 50, 50)
 COLOR_CELL = (50, 200, 50)
+
+# ==================== 默认阈值常量 ====================
+DEFAULT_HEAD_THRESH = 0.5
+DEFAULT_TAIL_THRESH = 0.05
 
 
 class MainWindow(QMainWindow):
@@ -55,10 +60,10 @@ class MainWindow(QMainWindow):
         self.image_files: list = []
         self._cell_counter = 0
         self.pixel_size_um: float = 1.0
+        self.comet_mode: int = 1
 
         self._init_ui()
         self._create_menu_bar()
-        self._create_toolbar()
         self._create_status_bar()
         self._update_mode_ui()
 
@@ -67,8 +72,29 @@ class MainWindow(QMainWindow):
     def _init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
+        main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(4, 4, 4, 4)
+
+        # ====== 顶部导航栏（居中） ======
+        nav_bar = QHBoxLayout()
+        nav_bar.addStretch()
+        self.btn_prev = QPushButton("上一张")
+        self.btn_prev.clicked.connect(self._on_prev_image)
+        self.lbl_image_index = QLabel("")
+        self.lbl_image_index.setAlignment(Qt.AlignCenter)
+        self.btn_next = QPushButton("下一张")
+        self.btn_next.clicked.connect(self._on_next_image)
+        nav_bar.addWidget(self.btn_prev)
+        nav_bar.addWidget(self.lbl_image_index)
+        nav_bar.addWidget(self.btn_next)
+        nav_bar.addStretch()
+        nav_bar.addWidget(QLabel("分割模式:"))
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(["模式1 (方向限制)", "模式2 (锥形限制)"])
+        self.combo_mode.currentIndexChanged.connect(self._on_mode_changed)
+        self.combo_mode.setMaximumWidth(200)
+        nav_bar.addWidget(self.combo_mode)
+        main_layout.addLayout(nav_bar)
 
         # ====== 左侧面板 ======
         left_panel = QGroupBox("图片列表")
@@ -81,21 +107,8 @@ class MainWindow(QMainWindow):
         btn_load = QPushButton("加载图片...")
         btn_load.clicked.connect(self._on_load_image)
 
-        nav_layout = QHBoxLayout()
-        self.btn_prev = QPushButton("< 上一张")
-        self.btn_prev.clicked.connect(self._on_prev_image)
-        self.btn_next = QPushButton("下一张 >")
-        self.btn_next.clicked.connect(self._on_next_image)
-        nav_layout.addWidget(self.btn_prev)
-        nav_layout.addWidget(self.btn_next)
-
-        self.lbl_image_index = QLabel("")
-        self.lbl_image_index.setAlignment(Qt.AlignCenter)
-
         left_layout.addWidget(btn_load)
         left_layout.addWidget(self.file_list)
-        left_layout.addLayout(nav_layout)
-        left_layout.addWidget(self.lbl_image_index)
 
         # ====== 中间面板 ======
         image_panel = QWidget()
@@ -138,8 +151,8 @@ class MainWindow(QMainWindow):
         self.spin_head_thresh = QDoubleSpinBox()
         self.spin_head_thresh.setRange(0.0, 1.0)
         self.spin_head_thresh.setDecimals(3)
-        self.spin_head_thresh.setSingleStep(0.001)
-        self.spin_head_thresh.setValue(0.5)
+        self.spin_head_thresh.setSingleStep(0.1)
+        self.spin_head_thresh.setValue(DEFAULT_HEAD_THRESH)
         self.spin_head_thresh.setToolTip("头部亮度阈值：越高头部识别越严格")
         thresh_layout.addWidget(self.spin_head_thresh)
 
@@ -147,8 +160,8 @@ class MainWindow(QMainWindow):
         self.spin_tail_thresh = QDoubleSpinBox()
         self.spin_tail_thresh.setRange(0.0, 1.0)
         self.spin_tail_thresh.setDecimals(3)
-        self.spin_tail_thresh.setSingleStep(0.001)
-        self.spin_tail_thresh.setValue(0.2)
+        self.spin_tail_thresh.setSingleStep(0.01)
+        self.spin_tail_thresh.setValue(DEFAULT_TAIL_THRESH)
         self.spin_tail_thresh.setToolTip("尾部亮度阈值：越高彗星识别越严格，越接近0越宽泛")
         thresh_layout.addWidget(self.spin_tail_thresh)
         thresh_layout.addStretch()
@@ -269,20 +282,6 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)
 
-    # ==================== 工具栏 ====================
-
-    def _create_toolbar(self):
-        toolbar = QToolBar("主工具栏")
-        toolbar.setIconSize(QSize(24, 24))
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-        toolbar.addWidget(QPushButton("打开图片", clicked=self._on_load_image))
-        toolbar.addSeparator()
-        toolbar.addWidget(QPushButton("<", clicked=self._on_prev_image, maximumWidth=40))
-        toolbar.addWidget(QPushButton(">", clicked=self._on_next_image, maximumWidth=40))
-        toolbar.addSeparator()
-        toolbar.addWidget(QPushButton("导出 Excel", clicked=self._on_export_excel))
-
     # ==================== 状态栏 ====================
 
     def _create_status_bar(self):
@@ -295,24 +294,40 @@ class MainWindow(QMainWindow):
     def _enter_mode(self, new_mode: str):
         if self._raw_cv_image is None:
             QMessageBox.information(self, "提示", "请先加载一张图片")
-            self.btn_bg.setChecked(False)
-            self.btn_cell.setChecked(False)
+            self.mode = self.MODE_IDLE
+            self._update_mode_ui()
             return
 
         if self.mode == new_mode:
             self.mode = self.MODE_IDLE
-            self.btn_bg.setChecked(False)
-            self.btn_cell.setChecked(False)
-            self.canvas.setCursor(Qt.ArrowCursor)
+            self._update_mode_ui()
+            return
+
+        if new_mode == self.MODE_CELL and self.bg_mean is None:
+            QMessageBox.warning(self, "提示", "请先框选背景区域，再框选细胞！")
+            self.mode = self.MODE_IDLE
             self._update_mode_ui()
             return
 
         self.mode = new_mode
-        self.btn_bg.setChecked(new_mode == self.MODE_BG)
-        self.btn_cell.setChecked(new_mode == self.MODE_CELL)
         self.canvas.clear_selection()
+        self._update_mode_ui()
+        self.status_bar.showMessage(f"当前模式: {self.mode}")
 
-        if new_mode == self.MODE_BG:
+    def _on_mode_changed(self, index):
+        """分割模式切换回调：0=模式1，1=模式2"""
+        self.comet_mode = index + 1
+        self.status_bar.showMessage(f"分割模式已切换为: 模式{self.comet_mode}")
+
+    def _update_mode_ui(self):
+        """根据当前 self.mode 同步按钮选中态、光标、框选颜色与提示文案。"""
+        is_bg = self.mode == self.MODE_BG
+        is_cell = self.mode == self.MODE_CELL
+
+        self.btn_bg.setChecked(is_bg)
+        self.btn_cell.setChecked(is_cell)
+
+        if is_bg:
             self.canvas.set_selection_color(*COLOR_BG)
             self.canvas.setCursor(Qt.CrossCursor)
             self.lbl_mode_hint.setText("背景模式：请在图像上拖拽框选一片 <b>没有细胞的背景区域</b>")
@@ -320,13 +335,7 @@ class MainWindow(QMainWindow):
                 "QLabel { font-size: 13px; padding: 6px; background: #fce4e4; "
                 "border-radius: 4px; color: #721c24; }"
             )
-        elif new_mode == self.MODE_CELL:
-            if self.bg_mean is None:
-                QMessageBox.warning(self, "提示", "请先框选背景区域，再框选细胞！")
-                self.mode = self.MODE_IDLE
-                self.btn_cell.setChecked(False)
-                self._update_mode_ui()
-                return
+        elif is_cell:
             self.canvas.set_selection_color(*COLOR_CELL)
             self.canvas.setCursor(Qt.CrossCursor)
             self.lbl_mode_hint.setText("细胞模式：请在图像上拖拽框选 <b>一个彗星细胞</b>（右键取消）")
@@ -335,12 +344,7 @@ class MainWindow(QMainWindow):
                 "border-radius: 4px; color: #155724; }"
             )
         else:
-            self._update_mode_ui()
-
-        self.status_bar.showMessage(f"当前模式: {self.mode}")
-
-    def _update_mode_ui(self):
-        if self.mode == self.MODE_IDLE:
+            self.canvas.setCursor(Qt.ArrowCursor)
             if self._raw_cv_image is None:
                 self.lbl_mode_hint.setText("请先加载图片")
                 self.lbl_mode_hint.setStyleSheet(
@@ -367,17 +371,24 @@ class MainWindow(QMainWindow):
     # ==================== 图片加载 ====================
 
     def _on_load_image(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择彗星实验图片", "",
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择彗星实验图片（可多选）", "",
             "图片文件 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;所有文件 (*)"
         )
-        if path:
-            self._save_current_results()
-            self.all_results = []
-            self.image_files = [path]
-            self.file_list.clear()
+        if not paths:
+            return
+
+        self._save_current_results()
+        self.all_results = []
+        self.bg_mean = None
+        self.mode = self.MODE_IDLE
+        self.image_files = list(paths)
+        self.file_list.clear()
+        for path in paths:
             self.file_list.addItem(os.path.basename(path))
-            self._switch_to_image(path)
+
+        self.status_bar.showMessage(f"已加载 {len(paths)} 张图片")
+        self._switch_to_image(paths[0])
 
     def _on_load_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择包含彗星图片的文件夹")
@@ -386,6 +397,8 @@ class MainWindow(QMainWindow):
 
         self._save_current_results()
         self.all_results = []
+        self.bg_mean = None
+        self.mode = self.MODE_IDLE
 
         supported = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
         self.image_files = []
@@ -450,13 +463,9 @@ class MainWindow(QMainWindow):
         pixmap = QPixmap.fromImage(qimg)
         self.canvas.set_image(pixmap)
 
-        # 重置图片级状态
-        self.bg_mean = None
+        # 重置图片级状态（背景值与当前模式跨图片共享，不在此处重置）
         self.current_cells = []
         self._cell_counter = 0
-        self.mode = self.MODE_IDLE
-        self.btn_bg.setChecked(False)
-        self.btn_cell.setChecked(False)
         self._update_mode_ui()
         self._update_cell_table()
 
@@ -494,8 +503,6 @@ class MainWindow(QMainWindow):
     def _restore_results(self, result: dict):
         self.current_cells = result.get("cells", [])
         self._cell_counter = len(self.current_cells)
-        if self.current_cells:
-            self.bg_mean = self.current_cells[0].get("bg_mean", None)
         self._update_cell_table()
         self._update_mode_ui()
         self._refresh_overlay()
@@ -538,6 +545,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "背景已设置",
                 f"背景区域平均强度: <b>{self.bg_mean:.1f}</b>\n\n"
+                f"该背景值将用于整组图片，切换图片后无需重复框选。\n"
                 f"现在可以开始框选细胞了！"
             )
         self.status_bar.showMessage(f"背景已设置 — 平均强度: {self.bg_mean:.1f}")
@@ -566,15 +574,21 @@ class MainWindow(QMainWindow):
             processed = denoise(processed, method="gaussian", kernel_size=3)
             processed = enhance_clahe(processed, clip_limit=1.5)
 
-            # 分割（支持自定义头/尾阈值）
+            # 分割（支持自定义头/尾阈值 + 分割模式）
             if self.chk_custom_threshold.isChecked():
                 region = segment_comet(
                     processed,
                     head_thresh=self.spin_head_thresh.value(),
-                    tail_thresh=self.spin_tail_thresh.value()
+                    tail_thresh=self.spin_tail_thresh.value(),
+                    tail_mode=self.comet_mode
                 )
             else:
-                region = segment_comet(processed)
+                region = segment_comet(
+                    processed,
+                    head_thresh=DEFAULT_HEAD_THRESH,
+                    tail_thresh=DEFAULT_TAIL_THRESH,
+                    tail_mode=self.comet_mode
+                )
 
             if region is None:
                 QMessageBox.warning(
