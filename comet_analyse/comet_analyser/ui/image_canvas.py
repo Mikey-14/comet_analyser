@@ -9,7 +9,7 @@
 - 右键单击：取消当前框选
 """
 
-from PyQt5.QtWidgets import QLabel
+from PyQt5.QtWidgets import QLabel, QMenu
 from PyQt5.QtCore import Qt, QRect, pyqtSignal, QPoint, QPointF
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QPolygonF
 import numpy as np
@@ -32,6 +32,8 @@ class ImageCanvas(QLabel):
     rect_selected = pyqtSignal(QRect)   # 框选完成
     rect_changed = pyqtSignal(QRect)    # 拖拽中
     selection_cleared = pyqtSignal()     # 取消框选
+    cell_selected = pyqtSignal(int)     # 选中细胞（索引）
+    cell_delete_requested = pyqtSignal(int)  # 请求删除细胞（索引）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -61,6 +63,8 @@ class ImageCanvas(QLabel):
         # 每个标注: {"head_center": (x, y), "head_radius": float,
         #            "tail_contours": [[(x, y), ...], ...]}
         self._annotations: list = []
+        self._cell_bboxes: list = []       # 每个细胞的外接矩形（原图坐标）
+        self._selected_cell_idx: int = -1  # 当前选中的细胞索引
 
     # ==================== 公共接口 ====================
 
@@ -72,8 +76,10 @@ class ImageCanvas(QLabel):
         self._update_scaled()
 
     def set_annotations(self, annotations: list):
-        """设置标注图层内容（替换现有标注）"""
+        """设置标注图层内容（替换现有标注），并计算碰撞检测用的外接矩形"""
         self._annotations = list(annotations)
+        self._cell_bboxes = [self._compute_cell_bbox(ann) for ann in annotations]
+        self._selected_cell_idx = -1
         self._update_display()
 
     def clear_annotations(self):
@@ -113,6 +119,33 @@ class ImageCanvas(QLabel):
         self._current_rect = None
         self._update_display()
         self.selection_cleared.emit()
+
+    def deselect_cell(self):
+        """取消细胞选中状态"""
+        self._selected_cell_idx = -1
+        self._update_display()
+
+    def _compute_cell_bbox(self, ann: dict) -> QRect:
+        """根据标注字典计算外接矩形（原图坐标）"""
+        hx, hy = ann.get("head_center", (0.0, 0.0))
+        r = float(ann.get("head_radius", 0.0))
+        min_x, min_y = hx - r, hy - r
+        max_x, max_y = hx + r, hy + r
+        for poly in ann.get("tail_contours", []):
+            for px, py in poly:
+                min_x = min(min_x, px)
+                min_y = min(min_y, py)
+                max_x = max(max_x, px)
+                max_y = max(max_y, py)
+        return QRect(int(min_x), int(min_y),
+                      max(1, int(max_x - min_x)), max(1, int(max_y - min_y)))
+
+    def _hit_test_cell(self, img_point: QPoint) -> int:
+        """检测原图坐标点是否命中某个细胞，返回索引（-1 表示未命中）"""
+        for i, bbox in enumerate(self._cell_bboxes):
+            if bbox.contains(img_point):
+                return i
+        return -1
 
     def has_selection(self) -> bool:
         """是否有有效框选"""
@@ -219,6 +252,18 @@ class ImageCanvas(QLabel):
             painter.setBrush(Qt.NoBrush)
             painter.drawEllipse(QPointF(cx, cy), r, r)
 
+        # 3. 选中细胞高亮（红色虚线矩形）
+        if (self._selected_cell_idx >= 0 and
+                self._selected_cell_idx < len(self._cell_bboxes)):
+            bbox = self._cell_bboxes[self._selected_cell_idx]
+            wx = ox + bbox.x() * s
+            wy = oy + bbox.y() * s
+            ww = bbox.width() * s
+            wh = bbox.height() * s
+            painter.setPen(QPen(QColor(255, 0, 0), 2, Qt.DashLine))
+            painter.setBrush(QBrush(QColor(255, 0, 0, 30)))
+            painter.drawRect(QRect(int(wx), int(wy), int(ww), int(wh)))
+
         painter.restore()
 
     # ==================== 坐标映射 ====================
@@ -261,11 +306,29 @@ class ImageCanvas(QLabel):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             if self._is_inside_image(event.pos()):
+                # 先检测是否点击在已有细胞上
+                img_pos = self._widget_to_image(event.pos())
+                clicked_idx = self._hit_test_cell(img_pos)
+                if clicked_idx >= 0:
+                    self._selected_cell_idx = clicked_idx
+                    self.setFocus()
+                    self._update_display()
+                    self.cell_selected.emit(clicked_idx)
+                    return
+                # 未命中细胞，开始框选
                 self._drawing = True
                 self._start_point = event.pos()
                 self._current_rect = QRect(self._start_point, self._start_point)
                 self.setCursor(Qt.CrossCursor)
         elif event.button() == Qt.RightButton:
+            if self._is_inside_image(event.pos()):
+                img_pos = self._widget_to_image(event.pos())
+                clicked_idx = self._hit_test_cell(img_pos)
+                if clicked_idx >= 0:
+                    self._selected_cell_idx = clicked_idx
+                    self._update_display()
+                    self._show_cell_context_menu(event.pos(), clicked_idx)
+                    return
             self.clear_selection()
 
     def mouseMoveEvent(self, event):
@@ -302,6 +365,22 @@ class ImageCanvas(QLabel):
             else:
                 self._current_rect = None
                 self._update_display()
+
+    def _show_cell_context_menu(self, pos: QPoint, idx: int):
+        """在鼠标位置弹出细胞右键菜单"""
+        menu = QMenu(self)
+        delete_action = menu.addAction("删除此细胞")
+        action = menu.exec_(self.mapToGlobal(pos))
+        if action == delete_action:
+            self.cell_delete_requested.emit(idx)
+
+    def keyPressEvent(self, event):
+        """Delete / Backspace 删除选中细胞"""
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            if self._selected_cell_idx >= 0:
+                self.cell_delete_requested.emit(self._selected_cell_idx)
+                return
+        super().keyPressEvent(event)
 
     # ==================== 框选样式设置 ====================
 

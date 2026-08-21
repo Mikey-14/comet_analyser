@@ -176,6 +176,8 @@ class MainWindow(QMainWindow):
             "ImageCanvas { background-color: #e8e8e8; border: 1px solid #ccc; }"
         )
         self.canvas.rect_selected.connect(self._on_rect_selected)
+        self.canvas.cell_selected.connect(self._on_cell_selected)
+        self.canvas.cell_delete_requested.connect(self._delete_cell)
 
         self.lbl_mode_hint = QLabel("请先加载图片，然后点击「框选背景区域」")
         self.lbl_mode_hint.setStyleSheet(
@@ -663,6 +665,27 @@ class MainWindow(QMainWindow):
             if cell.get("annotation")
         ]
         self.canvas.set_annotations(annotations)
+
+    def _on_cell_selected(self, idx: int):
+        """画布上选中细胞时，同步高亮表格对应行"""
+        if 0 <= idx < self.cell_table.rowCount():
+            self.cell_table.selectRow(idx)
+
+    def _delete_cell(self, idx: int):
+        """删除指定索引的细胞分析结果"""
+        if idx < 0 or idx >= len(self.current_cells):
+            return
+        label = self.current_cells[idx]["label"]
+        del self.current_cells[idx]
+        # 重新编号
+        self._cell_counter = len(self.current_cells)
+        for i, cell in enumerate(self.current_cells):
+            cell["label"] = f"Cell_{i + 1}"
+        self._save_current_results()
+        self._update_cell_table()
+        self._refresh_overlay()
+        self.canvas.deselect_cell()
+        self.status_bar.showMessage(f"已删除 {label}")
 
     # ==================== 完成当前图片 ====================
 
