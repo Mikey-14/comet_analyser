@@ -181,7 +181,7 @@ class MainWindow(QMainWindow):
 
         self.lbl_mode_hint = QLabel("请先加载图片，然后点击「框选背景区域」")
         self.lbl_mode_hint.setStyleSheet(
-            "QLabel { font-size: 13px; padding: 6px; background: #fff3cd; "
+            "QLabel { font-size: 12pt; padding: 6px; background: #fff3cd; "
             "border-radius: 4px; color: #856404; }"
         )
 
@@ -334,7 +334,7 @@ class MainWindow(QMainWindow):
             self.canvas.setCursor(Qt.CrossCursor)
             self.lbl_mode_hint.setText("背景模式：请在图像上拖拽框选一片 <b>没有细胞的背景区域</b>")
             self.lbl_mode_hint.setStyleSheet(
-                "QLabel { font-size: 13px; padding: 6px; background: #fce4e4; "
+                "QLabel { font-size: 12pt; padding: 6px; background: #fce4e4; "
                 "border-radius: 4px; color: #721c24; }"
             )
         elif is_cell:
@@ -342,7 +342,7 @@ class MainWindow(QMainWindow):
             self.canvas.setCursor(Qt.CrossCursor)
             self.lbl_mode_hint.setText("细胞模式：请在图像上拖拽框选 <b>一个彗星细胞</b>（右键取消）")
             self.lbl_mode_hint.setStyleSheet(
-                "QLabel { font-size: 13px; padding: 6px; background: #d4edda; "
+                "QLabel { font-size: 12pt; padding: 6px; background: #d4edda; "
                 "border-radius: 4px; color: #155724; }"
             )
         else:
@@ -350,19 +350,19 @@ class MainWindow(QMainWindow):
             if self._raw_cv_image is None:
                 self.lbl_mode_hint.setText("请先加载图片")
                 self.lbl_mode_hint.setStyleSheet(
-                    "QLabel { font-size: 13px; padding: 6px; background: #fff3cd; "
+                    "QLabel { font-size: 12pt; padding: 6px; background: #fff3cd; "
                     "border-radius: 4px; color: #856404; }"
                 )
             elif self.bg_mean is None:
                 self.lbl_mode_hint.setText("请点击「框选背景区域」开始")
                 self.lbl_mode_hint.setStyleSheet(
-                    "QLabel { font-size: 13px; padding: 6px; background: #fff3cd; "
+                    "QLabel { font-size: 12pt; padding: 6px; background: #fff3cd; "
                     "border-radius: 4px; color: #856404; }"
                 )
             else:
                 self.lbl_mode_hint.setText("请点击「框选细胞」继续添加细胞")
                 self.lbl_mode_hint.setStyleSheet(
-                    "QLabel { font-size: 13px; padding: 6px; background: #d4edda; "
+                    "QLabel { font-size: 12pt; padding: 6px; background: #d4edda; "
                     "border-radius: 4px; color: #155724; }"
                 )
 
